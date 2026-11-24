@@ -1,0 +1,6 @@
+{
+  "name": "iwroteit",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" }
+}
