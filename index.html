@@ -62,6 +62,14 @@ label.f{display:flex;flex-direction:column;gap:6px;font-size:14px;font-weight:50
 .empty .sig{font-family:Caveat,cursive;font-size:40px;color:var(--pen);display:block}
 .signed{border-top:1px dashed var(--line);padding-top:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
 .signed .sig{font-family:Caveat,cursive;font-size:28px;color:var(--pen)}
+.toggle{display:flex;align-items:center;gap:12px;cursor:pointer;font-size:15px;font-weight:500;min-height:44px;position:relative}
+.toggle input{position:absolute;opacity:0;width:44px;height:26px;margin:0;cursor:pointer}
+.toggle .sw{flex:none;width:44px;height:26px;border-radius:99px;background:var(--line);position:relative;transition:background .25s}
+.toggle .sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .3s cubic-bezier(.3,1.5,.4,1)}
+.toggle input:checked+.sw{background:var(--pen)}.toggle input:checked+.sw::after{transform:translateX(18px)}
+.toggle input:focus-visible+.sw{outline:3px solid color-mix(in srgb,var(--pen) 55%,transparent);outline-offset:2px}
+.toggle .note{display:block;font-weight:400}
+.locked{background:color-mix(in srgb,var(--hi) 45%,transparent);border-radius:4px;padding:0 2px}
 .qs{display:none;flex-direction:column;gap:12px;background:color-mix(in srgb,var(--hi) 22%,var(--paper));border-radius:14px;padding:14px}
 .qs.on{display:flex}
 .qs p{margin:0;font-weight:500}
@@ -158,6 +166,7 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;gap:1
           <select id="length"><option value="same">Keep about the same</option><option value="shorter">Shorter</option><option value="longer">Longer</option></select>
         </label>
       </div>
+      <label class="toggle"><input type="checkbox" id="keepBr" checked><span class="sw" aria-hidden="true"></span><span>Keep anything in brackets exactly as is <span class="note">like (Smith, 2024), [1], (March 3, 2025)</span></span></label>
       <div class="qs" id="qs"></div>
       <p class="err" id="err" hidden></p>
       <div class="row">
@@ -292,13 +301,19 @@ input.addEventListener('input',upd);
 function showErr(m){err.textContent=m;err.hidden=!m}
 function setBusy(b,label){busy=b;['#askBtn','#goBtn'].forEach(s=>$(s).disabled=b);document.querySelectorAll('[data-tweak]').forEach(x=>x.disabled=b);
   if(b&&label)$('#outWrap').innerHTML=`<div class="empty"><div><span class="loading"><i></i><i></i><i></i></span><br>${esc(label)}</div></div>`}
+/* lock bracketed text: (Smith, 2024), [1], (March 3) → ⟦1⟧ … restored word for word after */
+const BR=/\([^()\n]{1,250}\)|\[[^\[\]\n]{1,250}\]/g;
+function mask(t){if(!$('#keepBr').checked)return{m:t,map:[]};const map=[];return{m:t.replace(BR,s=>{map.push(s);return '⟦'+map.length+'⟧'}),map}}
+const unmask=(t,map)=>t.replace(/⟦(\d+)⟧/g,(s,n)=>map[n-1]??'');
+let lastRaw='',lastMap=[];
+$('#keepBr').checked=store.get('iw-keep',true);$('#keepBr').addEventListener('change',e=>store.set('iw-keep',e.target.checked));
 function answers(){return questions.map((q,i)=>({q,a:($('#a'+i)||{}).value||''}))}
 
 $('#askBtn').addEventListener('click',async()=>{
   if(!input.value.trim())return showErr('Paste your draft first.');showErr('');
   const b=$('#askBtn');b.disabled=true;b.innerHTML='Thinking <span class="loading"><i></i><i></i><i></i></span>';
   try{
-    const d=await api({mode:'questions',text:input.value,kind:$('#kind').value,profile:P});
+    const d=await api({mode:'questions',text:mask(input.value).m,locked:$('#keepBr').checked,kind:$('#kind').value,profile:P});
     questions=d.questions||[];
     $('#qs').innerHTML='<p>A few quick questions. Answer in your own words, even messy is fine. Skip any you want.</p>'+
       questions.map((q,i)=>`<label class="f">${esc(q)}<input type="text" id="a${i}" autocomplete="off"></label>`).join('')+
@@ -315,13 +330,22 @@ async function rewrite(tweak){
   if(busy)return;if(!input.value.trim())return showErr('Paste your draft first.');showErr('');
   setBusy(true,tweak?'Adjusting…':'Writing it your way…');
   try{
-    const d=await api({mode:'rewrite',text:input.value,kind:$('#kind').value,length:$('#length').value,profile:P,answers:answers(),tweak:tweak||'',previous:tweak?last:''});
-    last=d.text;showOut(last);
+    const {m,map}=mask(input.value);
+    const prev=tweak?(lastMap.length===map.length?lastRaw:last):'';
+    const d=await api({mode:'rewrite',text:m,locked:map.length>0,kind:$('#kind').value,length:$('#length').value,profile:P,answers:answers(),tweak:tweak||'',previous:prev});
+    lastRaw=d.text;lastMap=map;last=unmask(lastRaw,map);showOut(last,lastRaw,map);
+    const used=new Set((lastRaw.match(/⟦(\d+)⟧/g)||[]));
+    if(map.length&&used.size<map.length)showErr(`Heads up: ${map.length-used.size} bracketed bit${map.length-used.size>1?'s were':' was'} left out of the rewrite. Hit "Try again" or add ${map.length-used.size>1?'them':'it'} back by hand.`);
     const h=store.get('iw-hist',[]);h.unshift({t:Date.now(),kind:$('#kind').value,in:input.value,out:last});store.set('iw-hist',h.slice(0,20));
   }catch(e){showErr(e.message);if(last)showOut(last);else $('#outWrap').innerHTML='<div class="empty"><div>Nothing yet.</div></div>'}
   setBusy(false);
 }
-function showOut(t){const o=document.createElement('div');o.className='out';o.textContent=t;$('#outWrap').replaceChildren(o);
+function showOut(t,raw,map){const o=document.createElement('div');o.className='out';
+  if(raw&&map&&map.length){raw.split(/(⟦\d+⟧)/).forEach(part=>{const k=part.match(/^⟦(\d+)⟧$/);
+    if(k){if(map[k[1]-1]){const s=document.createElement('span');s.className='locked';s.title='Kept exactly as you wrote it';s.textContent=map[k[1]-1];o.append(s)}}
+    else o.append(part)})}
+  else o.textContent=t;
+  $('#outWrap').replaceChildren(o);
   $('#outTools').hidden=false;$('#outCount').textContent=words(t)+' words';
   if(matchMedia('(max-width:900px)').matches)o.scrollIntoView({behavior:'smooth',block:'start'})}
 $('#copyBtn').addEventListener('click',async()=>{const b=$('#copyBtn');try{await navigator.clipboard.writeText(last);b.textContent='Copied'}catch(e){b.textContent='Select & copy'}setTimeout(()=>b.textContent='Copy',1500)});

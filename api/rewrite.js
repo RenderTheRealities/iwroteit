@@ -92,11 +92,14 @@ export default async function handler(req, res) {
       : '';
     const length = { same: 'Keep roughly the same length.', shorter: 'Make it about 25% shorter.', longer: 'Make it about 25% longer, using their answers rather than padding.' }[b.length] || 'Keep roughly the same length.';
     const tweak = b.tweak ? `\nAdjustment requested on the last version: ${String(b.tweak).slice(0, 300)}` : '';
+    const lockNote = b.locked
+      ? '\nThe draft contains locked markers like ⟦1⟧, ⟦2⟧. Each one stands for a citation, date or note the person wrote in brackets. Copy every marker exactly, once each, and keep it attached to the same claim or sentence it belongs to. Never remove, merge, renumber or invent markers.'
+      : '';
     const base = b.previous ? `\n<last_version>\n${String(b.previous).slice(0, MAX_TEXT)}\n</last_version>` : '';
 
     const out = await callClaude(
       `${RULES}\n\n${who}`,
-      `This is a ${kind}. ${length}${tweak}\n<original>\n${text}\n</original>${base}\n${ans}\n\nReturn only the rewritten text, no title or notes.`
+      `This is a ${kind}. ${length}${tweak}${lockNote}\n<original>\n${text}\n</original>${base}\n${ans}\n\nReturn only the rewritten text, no title or notes.`
     );
     return res.status(200).json({ text: out });
   } catch (e) {
