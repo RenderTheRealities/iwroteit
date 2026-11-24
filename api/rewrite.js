@@ -43,7 +43,35 @@ Fold in the person's own answers (opinions, examples, experiences) where they fi
 Avoid stock phrasing that this person would not use, for example: "delve", "tapestry", "in today's fast-paced world", "it is important to note", "moreover", "furthermore", "in conclusion", "plays a crucial role", "navigate the complexities", "a testament to". Never use a word on their never-use list. Only use punctuation they say they use.
 Vary sentence length the way their samples do. Don't make every paragraph the same shape. Don't open with a summary of what you're about to say.`;
 
+// Free Gemini models get busy. If one is overloaded, wait a moment and fall back to the next free one.
+const FALLBACKS = {
+  gemini: [...new Set([MODEL, 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'])],
+  groq: [...new Set([MODEL, 'openai/gpt-oss-120b', 'llama-3.3-70b-versatile'])],
+  claude: [MODEL]
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const BUSY = new Set([429, 500, 502, 503, 504, 529]);
+
 async function callAI(system, user, maxTokens = 4000) {
+  let lastErr;
+  const models = FALLBACKS[PROVIDER];
+  for (let i = 0; i < models.length; i++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { return await callOnce(models[i], system, user, maxTokens); }
+      catch (e) {
+        lastErr = e;
+        const busy = BUSY.has(e.status) || /overloaded|high demand|unavailable|try again/i.test(e.message);
+        const missing = e.status === 404 || /not found|not supported/i.test(e.message);
+        if (missing) break;              // model id not available: try the next one
+        if (!busy) throw e;              // real error (bad key etc.)
+        if (attempt === 0) await sleep(1200);
+      }
+    }
+  }
+  const e = new Error('The free AI is really busy right now. Give it a minute and try again.'); e.status = 503; throw e;
+}
+
+async function callOnce(MODEL, system, user, maxTokens) {
   let url, headers = { 'content-type': 'application/json' }, body;
   if (PROVIDER === 'gemini') {
     url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`;
@@ -61,7 +89,6 @@ async function callAI(system, user, maxTokens = 4000) {
   const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (r.status === 429) { const e = new Error('The free AI limit was hit for now. Wait a minute and try again.'); e.status = 429; throw e; }
     const e = new Error(data?.error?.message || `AI error ${r.status}`); e.status = r.status; throw e;
   }
   let text;
@@ -120,6 +147,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ text: out });
   } catch (e) {
     const bad = [400, 401, 403].includes(e.status) && /key|auth|permission/i.test(e.message);
-    return res.status(e.status === 429 ? 429 : 500).json({ error: bad ? 'The API key in Vercel was rejected. Check it and redeploy.' : e.message });
+    return res.status([429, 503].includes(e.status) ? e.status : 500).json({ error: bad ? 'The API key in Vercel was rejected. Check it and redeploy.' : e.message });
   }
 }
