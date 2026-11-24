@@ -1,10 +1,14 @@
-// iwroteit — server side. Keeps the Anthropic API key off the browser.
-// Env vars (set in Vercel → Project → Settings → Environment Variables):
-//   ANTHROPIC_API_KEY  required
-//   APP_PASSWORD       optional — if set, the site asks for it before using your key
-//   MODEL              optional — defaults to claude-sonnet-5-5
+// iwroteit — server side. Keeps API keys off the browser.
+// Add ONE of these in Vercel → Project → Settings → Environment Variables:
+//   GEMINI_API_KEY     free — from aistudio.google.com (recommended free option)
+//   GROQ_API_KEY       free — from console.groq.com (backup free option)
+//   ANTHROPIC_API_KEY  paid — Claude, best quality
+// Optional:
+//   APP_PASSWORD       locks the site so only you can use your key
+//   MODEL              override the model for whichever provider is used
 
-const MODEL = process.env.MODEL || 'claude-sonnet-5-5';
+const PROVIDER = process.env.GEMINI_API_KEY ? 'gemini' : process.env.GROQ_API_KEY ? 'groq' : process.env.ANTHROPIC_API_KEY ? 'claude' : null;
+const MODEL = process.env.MODEL || { gemini: 'gemini-3.8-flash', groq: 'openai/gpt-oss-120b', claude: 'claude-sonnet-5-5' }[PROVIDER];
 const MAX_TEXT = 15000;
 
 function profileText(p = {}) {
@@ -39,27 +43,39 @@ Fold in the person's own answers (opinions, examples, experiences) where they fi
 Avoid stock phrasing that this person would not use, for example: "delve", "tapestry", "in today's fast-paced world", "it is important to note", "moreover", "furthermore", "in conclusion", "plays a crucial role", "navigate the complexities", "a testament to". Never use a word on their never-use list. Only use punctuation they say they use.
 Vary sentence length the way their samples do. Don't make every paragraph the same shape. Don't open with a summary of what you're about to say.`;
 
-async function callClaude(system, user, maxTokens = 4000) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] })
-  });
+async function callAI(system, user, maxTokens = 4000) {
+  let url, headers = { 'content-type': 'application/json' }, body;
+  if (PROVIDER === 'gemini') {
+    url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`;
+    headers['x-goog-api-key'] = process.env.GEMINI_API_KEY;
+    body = { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig: { maxOutputTokens: maxTokens + 4000, temperature: 0.9 } };
+  } else if (PROVIDER === 'groq') {
+    url = 'https://api.groq.com/openai/v1/chat/completions';
+    headers.authorization = `Bearer ${process.env.GROQ_API_KEY}`;
+    body = { model: MODEL, max_tokens: maxTokens + 2000, temperature: 0.8, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
+  } else {
+    url = 'https://api.anthropic.com/v1/messages';
+    headers['x-api-key'] = process.env.ANTHROPIC_API_KEY; headers['anthropic-version'] = '2023-06-01';
+    body = { model: MODEL, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+  }
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const msg = data?.error?.message || `Anthropic API error ${r.status}`;
-    const e = new Error(msg); e.status = r.status; throw e;
+    if (r.status === 429) { const e = new Error('The free AI limit was hit for now. Wait a minute and try again.'); e.status = 429; throw e; }
+    const e = new Error(data?.error?.message || `AI error ${r.status}`); e.status = r.status; throw e;
   }
-  return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  let text;
+  if (PROVIDER === 'gemini') text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
+  else if (PROVIDER === 'groq') text = data.choices?.[0]?.message?.content || '';
+  else text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  text = text.trim();
+  if (!text) throw new Error('The AI sent back an empty answer. Try again.');
+  return text;
 }
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
-  if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'The site owner hasn\'t added an ANTHROPIC_API_KEY in Vercel yet.' });
+  if (!PROVIDER) return res.status(503).json({ error: 'No AI key yet. Add GEMINI_API_KEY (free) in Vercel, then redeploy.' });
   if (process.env.APP_PASSWORD && req.headers['x-app-password'] !== process.env.APP_PASSWORD) {
     return res.status(401).json({ error: 'password' });
   }
@@ -75,7 +91,7 @@ export default async function handler(req, res) {
 
   try {
     if (b.mode === 'questions') {
-      const out = await callClaude(
+      const out = await callAI(
         'You help a person make a piece of writing genuinely theirs. You ask short, friendly questions that pull out their own opinions, examples and experiences, so the rewrite can include them. Reply with JSON only.',
         `${who}\n\nThis is a ${kind}. Here is the draft:\n<draft>\n${text}\n</draft>\n\nAsk 3 short questions (under 20 words each) whose answers would let the rewrite sound personal and specific to this person: their own view on the main point, a real example or experience they could mention, and anything they'd want to stress or cut. Plain casual wording. Return exactly: {"questions":["...","...","..."]}`,
         600
@@ -97,12 +113,13 @@ export default async function handler(req, res) {
       : '';
     const base = b.previous ? `\n<last_version>\n${String(b.previous).slice(0, MAX_TEXT)}\n</last_version>` : '';
 
-    const out = await callClaude(
+    const out = await callAI(
       `${RULES}\n\n${who}`,
       `This is a ${kind}. ${length}${tweak}${lockNote}\n<original>\n${text}\n</original>${base}\n${ans}\n\nReturn only the rewritten text, no title or notes.`
     );
     return res.status(200).json({ text: out });
   } catch (e) {
-    return res.status(e.status === 401 ? 502 : 500).json({ error: e.status === 401 ? 'The API key in Vercel was rejected. Check ANTHROPIC_API_KEY.' : e.message });
+    const bad = [400, 401, 403].includes(e.status) && /key|auth|permission/i.test(e.message);
+    return res.status(e.status === 429 ? 429 : 500).json({ error: bad ? 'The API key in Vercel was rejected. Check it and redeploy.' : e.message });
   }
 }
